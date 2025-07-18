@@ -3,36 +3,59 @@
  * Licensed under the MIT License: http://www.opensource.org/licenses/mit-license.php
  */ 
 (function () {
-	var background = chrome.extension.getBackgroundPage();	
-	var cCalc = background.cCalc;
 	var optionSel = "input";
 	var $options = $(optionSel);
+	var defaultOptions = {
+		zoom: 1,
+		width: "450px",
+		height: "400px", 
+		resultFont: "times",
+		inputFont: "courier",
+		titleFont: "courier",
+		headerLinksFont: "arial"
+	};
+	
 	function loadOptionValues() {		
-		//console.debug("otpoins", $options.length, $this.attr("type"));
 		$(optionSel).each(function() {
 			var $this = $(this);
-			//console.debug("otpoins", $options.length, this.id, $this.attr("type"));
-			var val = JSON.parse(localStorage["opt_"+this.id] || "[]")[0];
-			if (this.id == "height") {
-				this.value = val || "";
-			} else if ($this.attr("type") === "checkbox") {				
-				$this.attr("checked", !!val);
-			} else {
-				this.value = val || "";
-			}
-		})
+			// Use chrome.storage.local instead of localStorage
+			chrome.storage.local.get(['opt_' + this.id], function(result) {
+				var val = result['opt_' + this.id] ? JSON.parse(result['opt_' + this.id])[0] : null;
+				if (this.id == "height") {
+					this.value = val || "";
+				} else if ($this.attr("type") === "checkbox") {				
+					$this.attr("checked", !!val);
+				} else {
+					this.value = val || "";
+				}
+			}.bind(this));
+		});
 	}
 	
 	loadOptionValues();
 	
-	function updateOption() {		
-		cCalc.calcCmd[this.id](this.value);
+	function updateOption() {
+		var optionId = this.id;
+		var optionValue = this.value;
+		
+		// Use message passing to update options
+		chrome.runtime.sendMessage({
+			action: "updateOption",
+			optionId: optionId,
+			optionValue: optionValue
+		}, function(response) {
+			if (response && !response.success && response.error) {
+				console.error("Error updating option:", response.error);
+			}
+		});
+		
 		return this;
 	}
+	
 	$(document).delegate(optionSel, "keyup change blur", updateOption);
 	$(document).delegate(".reset", "click", function () {		
 		var $option = $(this).closest("tr").find("input");
-		$option.val(cCalc.calcCmd.defaultOptions[$option[0].id]).focus();
+		$option.val(defaultOptions[$option[0].id]).focus();
 		updateOption.call($option[0]);
 	});	
 }());

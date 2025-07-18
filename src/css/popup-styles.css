@@ -1,0 +1,9 @@
+#calcWrapper {				
+    position: relative;					
+    width: 450px;
+    height: 401px;				
+}
+
+.zero-height {
+    height: 0;
+}

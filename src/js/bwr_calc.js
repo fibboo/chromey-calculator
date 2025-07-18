@@ -23,7 +23,7 @@ var cCalc = (function (window, document) {
 	var	calcSelStart, calcSelEnd, // variables to keep track of caret postion or selection in calc input area
 		maxResults = 500, history = History(maxResults), // variables for history		
 		queryCount = 0,		
-		background = chrome.extension.getBackgroundPage(), 
+		background = {}, // Will be used to store state instead of accessing background page directly
 		//chromeyCalcHelperId = "kncknbclhdncdolkfleoeefggfbclgpp"; // dev id
 		chromeyCalcHelperId = "hfgnndipkjcpghbagmmcemdbjfclkcla"; // relase id	
 	var queryMode = {
@@ -77,15 +77,21 @@ var cCalc = (function (window, document) {
 		txt.remove();
 	}
 
-	function popOutCalc() {
+ function popOutCalc() {
 		var defaultPopOutWindowInfo = "width=300,height=400,scrollbars=no";
 		calcStore.save();		
-		if (background.calcPopOut) {
-			// don't let popout overwrite most current restults
-			background.calcPopOut.jQuery(background.calcPopOut).unbind("unload blur");
-			background.calcPopOut.close();
-		}
-		background.calcPopOut = background.open('calc.html', 'calcPopOut', localStorage.popOutWindowInfo || defaultPopOutWindowInfo);
+		
+		// Use message passing to communicate with the background service worker
+		chrome.runtime.sendMessage({ 
+			action: "openPopout",
+			windowInfo: localStorage.popOutWindowInfo || defaultPopOutWindowInfo
+		}, function(response) {
+			if (response && response.success) {
+				console.log("Popout window opened successfully");
+			} else if (response && response.error) {
+				console.error("Error opening popout window:", response.error);
+			}
+		});
 	}
 
 	// Store pop-out position and dimentions as a single string that can be passed to window.open()
@@ -94,8 +100,24 @@ var cCalc = (function (window, document) {
 		var width = ",width="+window.outerWidth;
 		var top = ",top="+window.screenTop;
 		var left = ",left="+window.screenLeft;
-		localStorage.popOutWindowInfo = "resizable=yes"+height+width+top+left;
-	}			
+		var windowInfo = "resizable=yes"+height+width+top+left;
+		localStorage.popOutWindowInfo = windowInfo;
+		
+		// Notify background service worker about the updated window information
+		chrome.runtime.sendMessage({ 
+			action: "savePopoutWindowInfo",
+			windowInfo: {
+				width: window.outerWidth,
+				height: window.outerHeight,
+				top: window.screenTop,
+				left: window.screenLeft
+			}
+		}, function(response) {
+			if (response && !response.success && response.error) {
+				console.error("Error saving popout window info:", response.error);
+			}
+		});
+	}
 	
 	// Get option value from localStorage
 	function getOption(opt, getFirst) {
@@ -111,15 +133,16 @@ var cCalc = (function (window, document) {
 	// -----------------------------------------------------------------------
 	var $calcInput,	$calcResults, $calcResultsWrapper;
 	function calcInit(currentWindow) {		
-		background.helperIsInstalled = false;
-		chrome.extension.sendRequest(chromeyCalcHelperId, {"ding": "dong"}, function (response) {
-			background.helperIsInstalled = true;			
+		// Store helper installation status in storage
+		chrome.storage.local.set({ 'helperIsInstalled': false });
+		chrome.runtime.sendMessage(chromeyCalcHelperId, {"ding": "dong"}, function (response) {
+			chrome.storage.local.set({ 'helperIsInstalled': true });
 		});
 		// Set window to whatever window was passed to calcInit
 		window = currentWindow;
 		document = window.document;
-		// Make sure we're using jQuery for current window
-		$ = jQuery = background.jQuery = background.$ = window.jQuery;
+		// Use jQuery for current window only
+		$ = jQuery = window.jQuery;
 		//delete localStorage.calcResults; delete localStorage.prevInputs; delete localStorage.varMap, localStorage.lastAns;		
 		//////
 		// Stuff to do before DOM is ready
@@ -161,21 +184,23 @@ var cCalc = (function (window, document) {
 			$(window).unbind().bind("unload blur", function () {
 				calcStore.save();				
 				
-				// If there's a popup, update if we're enntering stuff in the dropdown
-				if (background.calcPopOut && background.calcPopOut !== window) {
-					// don't let popout overwrite most current restults
-					background.calcPopOut.jQuery(background.calcPopOut).unbind("unload blur");					
-				} else if (background.calcPopOut && background.calcPopOut === window) {
-					// save popout size and position info
+				// Check if this is a popout window
+				if (window.opener) {
+					// This is a popout window, save its size and position
 					savePopOutWindowInfo();
+				} else {
+					// This is the main popup, notify background to handle any open popouts
+					chrome.runtime.sendMessage({ 
+						action: "updatePopup"
+					});
 				}
 			}).bind("blur.helperFlag", function () {				
-				// update flag for chekcing if helper extention is isntalled
-				background.helperIsInstalled = false;
-				chrome.extension.sendRequest(chromeyCalcHelperId, {"ding": "dong"}, function (response) {
-					background.helperIsInstalled = true;			
+				// update flag for checking if helper extension is installed
+				chrome.storage.local.set({ 'helperIsInstalled': false });
+				chrome.runtime.sendMessage(chromeyCalcHelperId, {"ding": "dong"}, function (response) {
+					chrome.storage.local.set({ 'helperIsInstalled': true });
 				});
-			});		
+			});
 
 			// Handle enter and arrow keydown events
 			$calcInput.keydown(function (e) {		
@@ -199,11 +224,16 @@ var cCalc = (function (window, document) {
 						$calcResults.empty();
 					} else if (inputVal.indexOf('useIcon(') == '0') { // Change Chromey's toolbar icon
 						iconName = "icon_" + inputVal.slice(8, inputVal.length - 1) + ".png"; // Strip the 'useIcon(' and ')' from our param here
-						// Don't change icon unless it exsits (list of possible icons set in background.html)
-						if (iconName in background.icons) {
-							localStorage.useIcon = iconName;
-							chrome.browserAction.setIcon({path: background.icons[iconName]});
-						}
+						// Send message to background service worker to change the icon
+						localStorage.useIcon = iconName;
+						chrome.runtime.sendMessage({
+							action: "setIcon",
+							iconName: iconName
+						}, function(response) {
+							if (response && !response.success && response.error) {
+								console.error("Error setting icon:", response.error);
+							}
+						});
 					} else if (inputVal.indexOf('cc(') == '0') { // A Chromey Calculator Command
 						// Strip the 'cc(' and ')' from our param here. Make an array of arguments
 						cmdArgs = inputVal.slice(3, inputVal.length - 1).split(/\s*,\s*/);
@@ -310,30 +340,41 @@ var cCalc = (function (window, document) {
 		google: "http://www.google.com/search?q="
 	};
 	
-	// Set google url
-	function setGoogleQueryUriHead() {
-		var localGoogleOn, localGoogleUrl, uri;
-		if (background.helperIsInstalled && getOption("localGoogleOn") && getOption("localGoogleUrl")) {
-			localGoogleOn = getOption("localGoogleOn")[0];
-			localGoogleUrl = getOption("localGoogleUrl")[0];
-			if (localGoogleOn && localGoogleUrl) {
-				uri = localGoogleUrl
-					.replace(/^(?!https?:\/\/)(.*)$/, "http://$1")
-					.replace(/([^\/])$/, "$1/")
-					+ "search?q=";
-				queryUriHead.google = uri;				
-			} else {				
+	// Set google url - now uses chrome.storage.local and takes a callback
+	function setGoogleQueryUriHead(callback) {
+		chrome.storage.local.get(['helperIsInstalled', 'opt_localGoogleOn', 'opt_localGoogleUrl'], function(result) {
+			var helperIsInstalled = result.helperIsInstalled || false;
+			var localGoogleOn, localGoogleUrl, uri;
+			
+			if (helperIsInstalled && result.opt_localGoogleOn && result.opt_localGoogleUrl) {
+				localGoogleOn = JSON.parse(result.opt_localGoogleOn)[0];
+				localGoogleUrl = JSON.parse(result.opt_localGoogleUrl)[0];
+				
+				if (localGoogleOn && localGoogleUrl) {
+					uri = localGoogleUrl
+						.replace(/^(?!https?:\/\/)(.*)$/, "http://$1")
+						.replace(/([^\/])$/, "$1/")
+						+ "search?q=";
+					queryUriHead.google = uri;				
+				} else {				
+					queryUriHead.google = queryUriHead.defaultGoogle;
+				}
+			} else {
 				queryUriHead.google = queryUriHead.defaultGoogle;
 			}
-		} else {
-			queryUriHead.google = queryUriHead.defaultGoogle;
-		}
+			
+			if (callback) callback();
+		});
 	}
 	
-	function doHelperQuery(queryType) {
-		console.debug("------->", queryType, queryType === "google" && queryUriHead.google !== queryUriHead.defaultGoogle, 
-		"\n-->", queryUriHead.google, "\n-->", background.helperIsInstalled, queryUriHead.defaultGoogle);
-		return background.helperIsInstalled && queryType === "google" && queryUriHead.google !== queryUriHead.defaultGoogle;
+	// This function now takes a callback to handle the asynchronous nature of chrome.storage.local.get
+	function doHelperQuery(queryType, callback) {
+		// Get helper installation status from storage
+		chrome.storage.local.get(['helperIsInstalled'], function(result) {
+			var helperIsInstalled = result.helperIsInstalled || false;
+			var useHelper = helperIsInstalled && queryType === "google" && queryUriHead.google !== queryUriHead.defaultGoogle;
+			callback(useHelper);
+		});
 	}
 
 	// -----------------------------------------------------------------------
@@ -357,12 +398,8 @@ var cCalc = (function (window, document) {
 			// restore displayed results
 			$calcResults[0].innerHTML = localStorage.calcResults || '';
 
-			// restore results scroll position (actually... scroll to bottom);
-			if (background.calcPopOut === window) {
-				$calcResultsWrapper[0].scrollTop = $calcResultsWrapper[0].scrollHeight;
-			} else {
-				$calcResultsWrapper[0].scrollTop = $calcResultsWrapper[0].scrollHeight;
-			}
+			// restore results scroll position (scroll to bottom)
+			$calcResultsWrapper[0].scrollTop = $calcResultsWrapper[0].scrollHeight;
 
 			// restore input history
 			if (localStorage.prevInputs) {
@@ -402,9 +439,11 @@ var cCalc = (function (window, document) {
 			localStorage.calcSelEnd = $calcInput[0].selectionEnd;
 
 			// store scroll position
-			if (background.calcPopOut === window) {
+			if (window.opener) {
+				// This is a popout window
 				localStorage.popOutScrollTop = $calcResultsWrapper.scrollTop();
 			} else {
+				// This is the main popup
 				localStorage.scrollTop = $calcResultsWrapper.scrollTop();
 			}
 		}
@@ -566,32 +605,29 @@ var cCalc = (function (window, document) {
 				result.queryType = queryType;
 				callback && callback(result);
 			} else {
-				if (getOption("localGoogleUrl")) {
-					localGoogleOn = getOption("localGoogleOn")[0];
-					localGoogleUrl = getOption("localGoogleUrl")[0];
-					if (localGoogleOn && localGoogleUrl) {
-					}
-				}				
-				// Set google query head
-				setGoogleQueryUriHead();				
-				// Create query uri
-				uri = createQueryUri[queryType](input.replace(rxCleanInput, ''));				
-				if (!uri) {
-					queryCallback(input);
-				} else {
-					// Query for result								
-					if (doHelperQuery(queryType)) {
-						// Let Chromey Calculator Enhancer handle query
-						chrome.extension.sendRequest(chromeyCalcHelperId, {queryUri: uri}, function (response) {							
-							queryCallback(response.doc);		
-						});
+				// Set google query head with callback
+				setGoogleQueryUriHead(function() {
+					// Create query uri
+					uri = createQueryUri[queryType](input.replace(rxCleanInput, ''));				
+					if (!uri) {
+						queryCallback(input);
 					} else {
-						$.ajax({
-							url: uri,
-							success: queryCallback
+						// Query for result - use the callback version of doHelperQuery
+						doHelperQuery(queryType, function(useHelper) {
+							if (useHelper) {
+								// Let Chromey Calculator Enhancer handle query
+								chrome.runtime.sendMessage(chromeyCalcHelperId, {queryUri: uri}, function (response) {							
+									queryCallback(response.doc);		
+								});
+							} else {
+								$.ajax({
+									url: uri,
+									success: queryCallback
+								});
+							}
 						});
 					}
-				}
+				});
 			}
 
 			function queryCallback(doc) {
